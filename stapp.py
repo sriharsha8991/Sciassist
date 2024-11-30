@@ -91,7 +91,7 @@ def ingest_into_vectordb(split_docs):
 
 # Function to get the conversation chain
 def get_conversation_chain(retriever):
-    llm = Ollama(model="llama3.2")
+    llm = Ollama(model="llama3.2",base_url="http://localhost:11434")
     contextualize_q_system_prompt = (
         "Given the chat history and the latest user question, "
         "provide a response that directly addresses the user's query based on the provided  documents. "
