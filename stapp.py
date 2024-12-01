@@ -13,7 +13,8 @@ from sentence_transformers import SentenceTransformer, util
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain.chains import create_history_aware_retriever
 from langchain_huggingface import HuggingFaceEmbeddings
-
+from groq import Groq
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 bot_template = '''
 <div style="display: flex; align-items: center; margin-bottom: 10px;">
@@ -91,13 +92,65 @@ def ingest_into_vectordb(split_docs):
 
 # Function to get the conversation chain
 def get_conversation_chain(retriever):
-    llm = Ollama(model="llama3.2",base_url="http://ollama:11434/")
-    contextualize_q_system_prompt = (
-        "Given the chat history and the latest user question, "
-        "provide a response that directly addresses the user's query based on the provided  documents. "
-        "Do not rephrase the question or ask follow-up questions."
-    )
+    # Initialize Groq LLM
+    client = Groq(api_key="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")
 
+    # Define a function to use the Groq LLM for creating completions
+    # Define the prompts
+    def groq_completion(messages, temperature=1, max_tokens=1024, top_p=1, stream=False, stop=None):
+    # Validate and convert messages
+        serialized_messages = []
+        for msg in messages:
+            # Standardize role values
+            if isinstance(msg, SystemMessage):
+                serialized_messages.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, HumanMessage):
+                serialized_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                serialized_messages.append({"role": "assistant", "content": msg.content})
+            elif isinstance(msg, dict):
+                # Ensure role is valid
+                role = msg.get('role', '').lower()
+                if role not in ['system', 'user', 'assistant']:
+                    # Default to 'user' if role is invalid
+                    role = 'user'
+                serialized_messages.append({
+                    'role': role, 
+                    'content': msg.get('content', '')
+                })
+            else:
+                # Fallback for unexpected types
+                print(f"Unexpected message type: {type(msg)}")
+                serialized_messages.append({
+                    'role': 'user', 
+                    'content': str(msg)
+                })
+        
+        # Debug print to check serialized messages
+        print("Serialized messages:", serialized_messages)
+
+        try:
+            # Call Groq API
+            completion = client.chat.completions.create(
+                model="llama-3.1-70b-versatile",
+                messages=serialized_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                stream=stream,
+                stop=stop,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            # Detailed error logging
+            print(f"Error in Groq API call: {e}")
+            print("Serialized messages:", serialized_messages)
+            raise
+    contextualize_q_system_prompt = (
+    "Given the chat history and the latest user question, "
+    "provide a response that directly addresses the user's query based on the provided documents. "
+    "Do not rephrase the question or ask follow-up questions."
+)
 
     contextualize_q_prompt = ChatPromptTemplate.from_messages(
         [
@@ -106,10 +159,11 @@ def get_conversation_chain(retriever):
             ("human", "{input}"),
         ]
     )
-    history_aware_retriever = create_history_aware_retriever(
-        llm, retriever, contextualize_q_prompt
-    )
 
+    # Create the history-aware retriever using the Groq LLM
+    history_aware_retriever = create_history_aware_retriever(
+        groq_completion, retriever, contextualize_q_prompt
+    )
 
     ### Answer question ###
     system_prompt = (
@@ -117,15 +171,14 @@ def get_conversation_chain(retriever):
 
 Follow this response structure for consistency:
 
-**Question:** Restate the input question for clarity.
+*Question:* Restate the input question for clarity.
 
-**Answer:** Provide a step-by-step explanation or directly state the answer using only the given context. Avoid adding any unsupported information.
+*Answer:* Provide a step-by-step explanation or directly state the answer using only the given context. Avoid adding any unsupported information.
 
-**Evidence:** Highlight the specific part(s) of the context you used to derive the answer.
+*Evidence:* Highlight the specific part(s) of the context you used to derive the answer.
 
-**Disclaimer:** If the answer cannot be derived from the context, explicitly state: "The required information is not available in the provided context."
+*Disclaimer:* If the answer cannot be derived from the context, explicitly state: "The required information is not available in the provided context."
     
-                                                                 
 Here is the context for this task:
 <context>
 {context}
@@ -144,20 +197,20 @@ Question:
             ("human", "{input}"),
         ]
     )
-    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
 
+    # Create the question-answer chain
+    question_answer_chain = create_stuff_documents_chain(groq_completion, qa_prompt)
+
+    # Combine the retriever and QA chain
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-
 
     ### Statefully manage chat history ###
     store = {}
-
 
     def get_session_history(session_id: str) -> BaseChatMessageHistory:
         if session_id not in store:
             store[session_id] = ChatMessageHistory()
         return store[session_id]
-
 
     conversational_rag_chain = RunnableWithMessageHistory(
         rag_chain,
@@ -166,7 +219,9 @@ Question:
         history_messages_key="chat_history",
         output_messages_key="answer",
     )
+
     return conversational_rag_chain
+
 
 def calculate_similarity_score(answer: str, context_docs: list) -> float:
     model = SentenceTransformer("BAAI/bge-small-en-v1.5")
